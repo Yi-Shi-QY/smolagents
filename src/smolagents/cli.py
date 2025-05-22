@@ -16,18 +16,20 @@
 # limitations under the License.
 import argparse
 import os
+from pathlib import Path
 
 from dotenv import load_dotenv
 
 from smolagents import CodeAgent, InferenceClientModel, LiteLLMModel, Model, OpenAIServerModel, Tool, TransformersModel
 from smolagents.default_tools import TOOL_MAPPING
+from smolagents.utils.service_generator import generate_agent_service_files
 
 
 leopard_prompt = "How many seconds would it take for a leopard at full speed to run through Pont des Arts?"
 
 
-def parse_arguments():
-    parser = argparse.ArgumentParser(description="Run a CodeAgent with all specified parameters")
+def _parse_run_arguments(parser):
+    """Helper function to add arguments for the 'run' command."""
     parser.add_argument(
         "prompt",
         type=str,
@@ -82,8 +84,63 @@ def parse_arguments():
         type=str,
         help="The API key for the model",
     )
+    parser.set_defaults(func=_handle_run_agent)
+
+def _parse_wrap_fastapi_arguments(parser):
+    """Helper function to add arguments for the 'wrap-fastapi' command."""
+    parser.add_argument(
+        "--agent_folder_path", 
+        type=str, 
+        required=True, 
+        help="Path to the folder where the smolagent has been saved (using agent.save())."
+    )
+    parser.add_argument(
+        "--output_dir", 
+        type=str, 
+        required=True, 
+        help="Path to the directory where the FastAPI app files will be generated."
+    )
+    parser.set_defaults(func=_handle_wrap_fastapi)
+
+def parse_arguments():
+    parser = argparse.ArgumentParser(description="Smolagents CLI tool.")
+    subparsers = parser.add_subparsers(dest="command", help="Available commands", required=True)
+
+    # Subparser for the 'run' command
+    run_parser = subparsers.add_parser("run", help="Run a CodeAgent with specified parameters.")
+    _parse_run_arguments(run_parser)
+
+    # Subparser for the 'wrap-fastapi' command
+    wrap_parser = subparsers.add_parser("wrap-fastapi", help="Wrap a saved smolagent into a FastAPI service.")
+    _parse_wrap_fastapi_arguments(wrap_parser)
+    
     return parser.parse_args()
 
+def _handle_run_agent(args):
+    """Handles the 'run' command."""
+    run_smolagent(
+        args.prompt,
+        args.tools,
+        args.model_type,
+        args.model_id,
+        provider=args.provider,
+        api_base=args.api_base,
+        api_key=args.api_key,
+        imports=args.imports,
+        verbosity_level=args.verbosity_level,
+    )
+
+def _handle_wrap_fastapi(args):
+    """Handles the 'wrap-fastapi' command."""
+    generate_agent_service_files(args.agent_folder_path, args.output_dir)
+    print(f"\\nFastAPI wrapper generation complete. Files are in: {args.output_dir}")
+    print(f"MCP Tool Manifest generated at {Path(args.output_dir) / 'mcp_tool.json'}")
+    agent_name_cli = Path(args.agent_folder_path).name
+    docker_image_cli_tag = agent_name_cli.lower().replace("-", "_").replace(" ", "_") + "_service"
+    print("\\nTo build and run the Docker container:")
+    print(f"1. cd {args.output_dir}")
+    print(f"2. docker build -t {docker_image_cli_tag} .")
+    print(f"3. docker run -p 8000:8000 {docker_image_cli_tag}")
 
 def load_model(
     model_type: str,
@@ -125,6 +182,7 @@ def run_smolagent(
     api_key: str | None = None,
     imports: list[str] | None = None,
     provider: str | None = None,
+    verbosity_level: int = 1,
 ) -> None:
     load_dotenv()
 
@@ -141,23 +199,25 @@ def run_smolagent(
                 raise ValueError(f"Tool {tool_name} is not recognized either as a default tool or a Space.")
 
     print(f"Running agent with these tools: {tools}")
-    agent = CodeAgent(tools=available_tools, model=model, additional_authorized_imports=imports)
+    agent = CodeAgent(
+        tools=available_tools, 
+        model=model, 
+        additional_authorized_imports=imports,
+        verbosity_level=verbosity_level 
+    )
 
     agent.run(prompt)
 
 
 def main() -> None:
     args = parse_arguments()
-    run_smolagent(
-        args.prompt,
-        args.tools,
-        args.model_type,
-        args.model_id,
-        provider=args.provider,
-        api_base=args.api_base,
-        api_key=args.api_key,
-        imports=args.imports,
-    )
+    if hasattr(args, 'func'):
+        args.func(args)
+    else:
+        # This case might happen if no subcommand is given and the main parser
+        # doesn't have a default action. However, with 'required=True' for subparsers,
+        # argparse should handle it.
+        print("Please specify a command: run or wrap-fastapi")
 
 
 if __name__ == "__main__":

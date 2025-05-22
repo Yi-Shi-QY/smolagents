@@ -1,0 +1,244 @@
+---
+title: Serving Agents as FastAPI Services
+description: Learn how to wrap your smolagents as FastAPI services and use them as tools.
+---
+
+# Serving Agents as FastAPI Services
+
+This guide explains how to take an agent you've built and saved with `smolagents` and expose it as a FastAPI service. This allows your agent to be called over HTTP, integrated into other applications, or even used as a tool by other agents. We'll also touch upon the generated MCP (Multi-Capability Portability) manifest.
+
+## Introduction
+
+Wrapping your `smolagent` as a service provides several benefits:
+- **Accessibility**: Makes your agent accessible over a network, allowing different clients (web UIs, other microservices, etc.) to interact with it.
+- **Modularity**: Decouples the agent's logic from the application that uses it, promoting a microservice-like architecture.
+- **Reusability**: A deployed agent can be easily reused by multiple other agents or systems as a specialized tool.
+- **Scalability**: Standard web service deployment techniques can be used to scale the agent service.
+
+`smolagents` provides a command-line utility to generate the necessary boilerplate for a FastAPI wrapper around your saved agent.
+
+## Generating the FastAPI Wrapper
+
+The primary tool for this is the `smolagent wrap-fastapi` CLI command.
+
+### CLI Command
+
+```bash
+smolagent wrap-fastapi --agent_folder_path <path_to_your_saved_agent> --output_dir <desired_output_directory_for_service>
+```
+
+### Arguments:
+-   `--agent_folder_path`: This is the path to the directory where your agent was previously saved using the `agent.save()` method. This folder contains your agent's configuration (`agent.json`), tools, and any managed agents.
+-   `--output_dir`: This is the path to the directory where the FastAPI application files will be generated. If it doesn't exist, it will be created.
+
+### Generated Output Structure
+
+Running the command will create the following structure in your specified `<output_dir>`:
+
+```
+<output_dir>/
+├── agent_data/            # A copy of your agent's saved data from --agent_folder_path
+│   ├── agent.json
+│   ├── prompts.yaml
+│   └── tools/
+│       └── ... (your agent's tools)
+├── Dockerfile             # For building a Docker image of the FastAPI service
+├── main.py                # The FastAPI application logic
+├── mcp_tool.json          # A manifest file describing the agent service
+└── requirements.txt       # Python dependencies for the service
+```
+
+### Role of Each Generated File:
+
+*   **`agent_data/`**: This directory is a direct copy of the content from your `--agent_folder_path`. The FastAPI service will load your agent from this directory when it starts up inside the Docker container.
+*   **`main.py`**: This Python script contains the FastAPI application. It defines:
+    *   Agent loading logic at startup (`MultiStepAgent.from_folder("./agent_data")`).
+    *   Request/response models using Pydantic.
+    *   An HTTP endpoint (e.g., `/run`) to receive tasks and run the agent.
+    *   Support for both regular and streaming responses.
+*   **`Dockerfile`**: A standard Dockerfile to containerize the FastAPI application. It:
+    *   Uses a Python base image.
+    *   Copies `main.py`, `requirements.txt`, and the `agent_data/` directory into the image.
+    *   Installs dependencies from `requirements.txt`.
+    *   Exposes a port (e.g., 8000) and runs the Uvicorn server to serve the FastAPI app.
+*   **`requirements.txt`**: Lists all Python dependencies needed to run the service, including `fastapi`, `uvicorn`, `smolagents`, and any specific requirements your agent might have (extracted from its `agent.json`).
+*   **`mcp_tool.json`**: A JSON file that describes your agent service in a machine-readable format. This can be used for integration with systems that support MCP or for service discovery. See more on this below.
+
+## Building and Running the Dockerized FastAPI Service
+
+Once the wrapper files are generated, you can build and run your agent service using Docker:
+
+1.  **Navigate to the output directory**:
+    ```bash
+    cd <output_dir> 
+    ```
+    (Replace `<output_dir>` with the actual path you provided).
+
+2.  **Build the Docker image**:
+    ```bash
+    docker build -t my_agent_service .
+    ```
+    You can replace `my_agent_service` with any tag you prefer for your Docker image.
+
+3.  **Run the Docker container**:
+    ```bash
+    docker run -p 8000:8000 my_agent_service
+    ```
+    This command maps port 8000 of your host machine to port 8000 of the Docker container where the FastAPI service is running.
+
+### Checking if it's Running
+
+You can check if the service is running by opening your web browser or using `curl` to access the root endpoint:
+```bash
+curl http://localhost:8000/
+```
+You should receive a JSON response like: `{"message":"Smolagent FastAPI Wrapper. Agent status: loaded"}`.
+
+## Interacting with the Service
+
+The generated FastAPI service exposes a `/run` endpoint that accepts POST requests to execute tasks with the agent.
+
+### Non-Streaming Request
+
+To send a task and receive a complete response once the agent is done:
+
+**Using `curl`**:
+```bash
+curl -X POST -H "Content-Type: application/json" \
+-d '{"task": "What is the capital of France?"}' \
+http://localhost:8000/run
+```
+The response will be a JSON object, for example:
+```json
+{"output":"The capital of France is Paris.","error":null}
+```
+
+**Using Python `requests`**:
+```python
+import requests
+import json
+
+payload = {"task": "What is the capital of France?"}
+response = requests.post("http://localhost:8000/run", json=payload)
+
+if response.status_code == 200:
+    print(response.json())
+else:
+    print(f"Error: {response.status_code} - {response.text}")
+```
+
+### Streaming Request
+
+To receive a stream of events (Server-Sent Events - SSE) as the agent processes the task:
+
+**Using `curl`**:
+```bash
+curl -N -X POST -H "Content-Type: application/json" -H "Accept: text/event-stream" \
+-d '{"task": "Tell me a short story about a brave robot.", "stream": true}' \
+http://localhost:8000/run
+```
+The `-N` flag for `curl` disables buffering. You'll see data chunks prefixed with `data: ` as they are streamed from the server.
+
+**Using Python `requests` (for streaming)**:
+```python
+import requests
+import json
+
+payload = {"task": "Tell me a short story about a brave robot.", "stream": true}
+headers = {'Accept': 'text/event-stream'}
+
+with requests.post("http://localhost:8000/run", json=payload, stream=True, headers=headers) as response:
+    if response.status_code == 200:
+        for line in response.iter_lines():
+            if line:
+                decoded_line = line.decode('utf-8')
+                if decoded_line.startswith('data: '):
+                    try:
+                        data_json_str = decoded_line[len('data: '):]
+                        data_json = json.loads(data_json_str)
+                        print(data_json) # Process the streamed chunk
+                    except json.JSONDecodeError:
+                        print(f"Warning: Could not decode JSON from stream: {decoded_line}")
+    else:
+        print(f"Error: {response.status_code} - {response.text}")
+```
+When streaming, the server sends events. Each event typically contains a JSON object. Look for an `'output'` key for agent outputs, or an `'event': 'done'` to signal the end of the stream. Errors during streaming might also be sent as JSON objects within the stream.
+
+## Using the Service as a Tool (`FastApiAgentTool`)
+
+Once your agent is running as a FastAPI service, you can use `smolagents.service_tools.FastApiAgentTool` to allow another `smolagent` (acting as a manager or consumer) to interact with it.
+
+```python
+from smolagents import CodeAgent, InferenceClientModel # Or any other model class
+from smolagents.service_tools import FastApiAgentTool
+
+# Ensure your FastAPI service for the wrapped agent is running.
+# If it's running locally via Docker as shown above, the URL will be http://localhost:8000
+REMOTE_AGENT_BASE_URL = "http://localhost:8000" 
+
+# Create a FastApiAgentTool instance pointing to your service
+# The name and description provided here are for the manager agent to understand this tool.
+remote_agent_tool = FastApiAgentTool(
+    base_url=REMOTE_AGENT_BASE_URL,
+    name="specialized_summary_agent_service", # Give it a descriptive name for the manager
+    description="A remote agent that specializes in summarizing text. Input its task as a string."
+)
+
+# Now, a manager agent can use this tool.
+# Configure a model for the manager agent.
+manager_model = InferenceClientModel() # Replace with your desired model configuration
+
+manager_agent = CodeAgent(
+    tools=[remote_agent_tool], # The remote agent service is now a tool
+    model=manager_model,
+    verbosity_level=1 # Set verbosity to see the manager's reasoning
+)
+
+# Example task for the manager agent
+# The manager CodeAgent will formulate the tool call to remote_agent_tool
+long_text_to_summarize = "Smolagents is a library for building AI agents. " * 20 # Example long text
+task_for_manager = f"Please use the '{remote_agent_tool.name}' to summarize the following text: '{long_text_to_summarize}'"
+
+print(f"Sending task to manager agent: {task_for_manager}")
+response = manager_agent.run(task_for_manager) 
+
+print("\\nFinal response from manager agent:")
+print(response)
+
+# Example of directly calling the tool (less common for CodeAgent, but shows functionality)
+# direct_call_response = remote_agent_tool(task="Summarize this direct text.")
+# print("\\nDirect call to tool:")
+# print(direct_call_response)
+
+# Example of streaming with the tool
+# print("\\nStreaming call to tool:")
+# for chunk in remote_agent_tool(task="Stream a summary of 'this direct text'.", stream=True):
+#     print(chunk, end="")
+# print()
+```
+
+The `FastApiAgentTool` handles the HTTP communication (POST requests to `/run`) with the remote agent service. The `CodeAgent` (or `ToolCallingAgent`) can then decide to call this tool based on the task it receives, just like any other local tool.
+
+## Understanding `mcp_tool.json`
+
+The `mcp_tool.json` file generated alongside your FastAPI service is a manifest that describes your agent service in a machine-readable format. MCP stands for Machine-readable Capability Portability (or sometimes Model Context Protocol). The goal of such a manifest is to enable interoperability and discovery of AI tools and services in a standardized way.
+
+Key fields in `mcp_tool.json` typically include:
+-   `mcp_version`: The version of the MCP specification it adheres to.
+-   `tool_name`: A human-readable name for your agent service.
+-   `description`: A brief description of what your agent service does.
+-   `protocol_details`: Information on how to interact with the service.
+    -   `type`: e.g., `http_api`.
+    -   `base_url`: The base URL where the service can be reached (defaults to `http://localhost:8000` in the generated file, which you might need to change for deployments).
+    -   `endpoints`: An array describing the available API endpoints (e.g., `/run`), their methods (e.g., `POST`), and their request/response schemas.
+-   `execution_environment`: Details about how the service is run.
+    -   `type`: e.g., `docker`.
+    -   `image`: The name of the Docker image (e.g., `my_agent_service:latest`).
+-   `dependencies`: Lists dependencies, such as Python packages required by the agent (extracted from your agent's `agent.json`).
+
+This manifest can be used by:
+-   **Tool Directories/Registries**: To list and categorize your agent service.
+-   **Orchestration Systems**: To understand how to deploy and interact with your agent.
+-   **Other Agents**: Potentially to dynamically discover and decide to use your agent service if they understand the MCP format.
+
+While full MCP ecosystems are still evolving, generating this manifest prepares your agent service for future integrations and promotes a more standardized way of describing AI capabilities.
