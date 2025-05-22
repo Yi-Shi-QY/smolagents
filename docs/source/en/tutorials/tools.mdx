@@ -9,13 +9,121 @@ Here, we're going to see advanced tool usage.
 
 - [Tools](#tools)
     - [What is a tool, and how to build one?](#what-is-a-tool-and-how-to-build-one)
-    - [Share your tool to the Hub](#share-your-tool-to-the-hub)
-    - [Import a Space as a tool](#import-a-space-as-a-tool)
-    - [Use LangChain tools](#use-langchain-tools)
+    - [Saving and Loading Tools Locally](#saving-and-loading-tools-locally)
+    - [Import a Gradio Space as a tool (Network Dependent)](#import-a-gradio-space-as-a-tool-network-dependent)
+    - [Use LangChain tools (May be Network Dependent)](#use-langchain-tools-may-be-network-dependent)
     - [Manage your agent's toolbox](#manage-your-agents-toolbox)
-    - [Use a collection of tools](#use-a-collection-of-tools)
+    - [Use a collection of tools (Local and MCP)](#use-a-collection-of-tools-local-and-mcp)
+    - [Using MCP tools with MCPClient (Network Dependent)](#using-mcp-tools-with-mcpclient-network-dependent)
 
 ### What is a tool, and how to build one?
+The `Tool` class is the base for creating custom functionalities that your AI agent can use. You can define a tool by subclassing `Tool` or by using the `@tool` decorator on a function.
+
+Here's how to define a tool by subclassing:
+```python
+from smolagents import Tool
+
+class HFModelDownloadsTool(Tool):
+    name = "model_download_counter"
+    description = """
+    This is a tool that returns the most downloaded model of a given task on the Hugging Face Hub.
+    It returns the name of the checkpoint."""
+    inputs = {
+        "task": {
+            "type": "string",
+            "description": "the task category (such as text-classification, depth-estimation, etc)",
+        }
+    }
+    output_type = "string"
+
+    def forward(self, task: str):
+        # Note: This specific tool's implementation uses huggingface_hub.list_models,
+        # which requires network access. When designing tools for purely offline use,
+        # ensure their forward method does not make network calls.
+        from huggingface_hub import list_models # Network-dependent import
+
+        model = next(iter(list_models(filter=task, sort="downloads", direction=-1)))
+        return model.id
+
+model_downloads_tool = HFModelDownloadsTool()
+```
+
+The custom tool subclasses [`Tool`] to inherit useful methods. The child class also defines:
+- An attribute `name`, which corresponds to the name of the tool itself. The name usually describes what the tool does.
+- An attribute `description` is used to populate the agent's system prompt.
+- An `inputs` attribute, a dictionary defining the expected inputs with their types and descriptions.
+- An `output_type` attribute, which specifies the output type (e.g., "string", "image", "number").
+- A `forward` method which contains the core logic to be executed.
+
+Alternatively, for simpler tools, you can use the `@tool` decorator:
+```python
+from smolagents import tool
+
+@tool
+def simple_adder(a: int, b: int) -> int:
+    """
+    Adds two integers. This tool is purely local and requires no network access.
+
+    Args:
+        a: The first integer.
+        b: The second integer.
+    """
+    return a + b
+
+# simple_adder_tool will be an instance of a Tool subclass
+# simple_adder_tool = simple_adder 
+# print(simple_adder_tool.name) -> "simple_adder"
+# print(simple_adder_tool.description) -> "Adds two integers..."
+```
+The function's docstring is used for the description, and type hints are used for `inputs` and `output_type`. The `@tool` decorator automatically handles the creation of the `Tool` subclass instance.
+
+And that's all it needs to be used in an agent!
+
+### Saving and Loading Tools Locally
+
+You can save your tool's definition to a local directory using the [`~Tool.save`] method. This method serializes your tool's code and metadata, making it easy to store, share, or reuse in other projects. The `save` method will typically create a Python file (e.g., `tool.py` or a name you specify based on `tool_file_name` argument) containing your tool's class definition and a `requirements.txt` if your tool has specific dependencies (detected from its imports). It can also generate an `app.py` for a Gradio interface if `make_gradio_app=True` (which is the default).
+
+```python
+# Assuming model_downloads_tool is an instance of a class inheriting from Tool
+output_directory = "./my_custom_tools/model_downloader"
+# This will save model_download_counter.py (or the name you provide in tool_file_name) 
+# and potentially app.py/requirements.txt in ./my_custom_tools/model_downloader
+# The .save() method itself is a local filesystem operation.
+model_downloads_tool.save(output_directory, tool_file_name=model_downloads_tool.name) 
+```
+When saving, ensure your tool's code, especially the `forward` method and any helper methods, is self-contained or relies on standard libraries / specified requirements. Imports should generally be within the methods or at the top of the tool's Python file for clarity when saved.
+
+To load a tool from its saved Python code file, you can use the [`~Tool.from_code`] class method. This method takes the Python code as a string. You'll typically read this from the `.py` file where the tool was saved.
+
+```python
+from smolagents import Tool, CodeAgent # Assuming CodeAgent and a model are defined
+
+# Path to the saved tool's Python file
+# This should match the tool_file_name used during save, or the default 'tool.py'
+tool_code_path = "./my_custom_tools/model_downloader/model_download_counter.py" 
+
+with open(tool_code_path, "r") as f:
+    tool_code_content = f.read()
+
+# Load the tool using from_code
+model_download_tool_loaded = Tool.from_code(tool_code_content)
+
+# Alternatively, you can load a tool from its dictionary representation
+# This dictionary can be obtained from tool_instance.to_dict()
+# tool_dict_example = model_downloads_tool.to_dict()
+# model_download_tool_from_dict = Tool.from_dict(tool_dict_example)
+```
+
+Make sure the Python file (e.g., `model_download_counter.py`) primarily contains the tool class definition that inherits from `Tool` and any necessary imports for that tool to function. The `from_code` method executes this code in a new module and looks for a class that is a subclass of `Tool`.
+
+Once loaded, the tool instance (e.g., `model_download_tool_loaded`) can be used in your agent:
+```python
+# model = ... (initialize your model, e.g., InferenceClientModel())
+# agent = CodeAgent(tools=[model_download_tool_loaded], model=model)
+# agent.run("Use the model download counter for text-classification.")
+```
+
+This local saving and loading mechanism allows for modular tool management.
 
 A tool is mostly a function that an LLM can use in an agentic system.
 
@@ -44,6 +152,9 @@ class HFModelDownloadsTool(Tool):
     output_type = "string"
 
     def forward(self, task: str):
+        # Note: This specific tool's implementation uses huggingface_hub.list_models,
+        # which requires network access. When designing tools for purely offline use,
+        # ensure their forward method does not make network calls.
         from huggingface_hub import list_models
 
         model = next(iter(list_models(filter=task, sort="downloads", direction=-1)))
@@ -65,52 +176,67 @@ There's another way to build a tool. In the [guided_tour](../guided_tour), we im
 
 In this case, you can build your tool by subclassing [`Tool`] as described above.
 
-### Share your tool to the Hub
+### Saving and Loading Tools Locally
 
-You can share your custom tool to the Hub as a Space repository by calling [`~Tool.push_to_hub`] on the tool. Make sure you've created a repository for it on the Hub and are using a token with read access.
-
-```python
-model_downloads_tool.push_to_hub("{your_username}/hf-model-downloads", token="<YOUR_HUGGINGFACEHUB_API_TOKEN>")
-```
-
-For the push to Hub to work, your tool will need to respect some rules:
-- All methods are self-contained, e.g. use variables that come either from their args.
-- As per the above point, **all imports should be defined directly within the tool's functions**, else you will get an error when trying to call [`~Tool.save`] or [`~Tool.push_to_hub`] with your custom tool.
-- If you subclass the `__init__` method, you can give it no other argument than `self`. This is because arguments set during a specific tool instance's initialization are hard to track, which prevents from sharing them properly to the hub. And anyway, the idea of making a specific class is that you can already set class attributes for anything you need to hard-code (just set `your_variable=(...)` directly under the `class YourTool(Tool):` line). And of course you can still create a class attribute anywhere in your code by assigning stuff to `self.your_variable`.
-
-
-Once your tool is pushed to Hub, you can visualize it. [Here](https://huggingface.co/spaces/m-ric/hf-model-downloads) is the `model_downloads_tool` that I've pushed. It has a nice gradio interface.
-
-When diving into the tool files, you can find that all the tool's logic is under [tool.py](https://huggingface.co/spaces/m-ric/hf-model-downloads/blob/main/tool.py). That is where you can inspect a tool shared by someone else.
-
-Then you can load the tool with [`load_tool`] or create it with [`~Tool.from_hub`] and pass it to the `tools` parameter in your agent.
-Since running tools means running custom code, you need to make sure you trust the repository, thus we require to pass `trust_remote_code=True` to load a tool from the Hub.
+You can save your tool's definition to a local directory using the [`~Tool.save`] method. This is useful for sharing tools or for organizing your projects. The `save` method will create a Python file (e.g., `tool.py`) containing your tool's code and a `requirements.txt` if needed.
 
 ```python
-from smolagents import load_tool, CodeAgent
-
-model_download_tool = load_tool(
-    "{your_username}/hf-model-downloads",
-    trust_remote_code=True
-)
+# Assuming model_downloads_tool is an instance of a class inheriting from Tool
+output_directory = "./my_custom_tools/model_downloader"
+# This will save model_download_counter.py (or similar, based on tool.name) 
+# and potentially app.py/requirements.txt in ./my_custom_tools/model_downloader
+# The .save() method itself is a local filesystem operation.
+model_downloads_tool.save(output_directory, tool_file_name=model_downloads_tool.name) 
 ```
 
-### Import a Space as a tool
+To load a tool from its saved code, you can use the [`~Tool.from_code`] class method. This method takes the Python code as a string. You'll typically read this from the `.py` file where the tool was saved.
 
-You can directly import a Gradio Space from the Hub as a tool using the [`Tool.from_space`] method!
+```python
+from smolagents import Tool, CodeAgent
+
+# Read the tool code from the saved file
+tool_code_path = "./my_custom_tools/model_downloader/model_download_counter.py" # Adjust filename if needed
+with open(tool_code_path, "r") as f:
+    tool_code_content = f.read()
+
+# Load the tool using from_code
+model_download_tool_loaded = Tool.from_code(tool_code_content)
+
+# You can also load a tool from its dictionary representation
+tool_dict = model_downloads_tool.to_dict()
+model_download_tool_from_dict = Tool.from_dict(tool_dict)
+```
+
+Make sure the file `model_download_counter.py` only contains the tool class definition and necessary imports. The `from_code` method expects to find a single class that inherits from `Tool` within the provided code string.
+
+You can then use `model_download_tool_loaded` or `model_download_tool_from_dict` in your agent:
+```python
+# model = ... (initialize your model, e.g., InferenceClientModel())
+# agent = CodeAgent(tools=[model_download_tool_loaded], model=model)
+# agent.run("Use the model download counter for text-classification.")
+```
+
+This local saving and loading mechanism allows for modular tool management.
+
+### Import a Gradio Space as a tool (Network Dependent)
+
+You can directly import a Gradio Space from the Hub as a tool using the [`~Tool.from_space`] method! This method inherently requires network access to communicate with the Gradio Space.
 
 You only need to provide the id of the Space on the Hub, its name, and a description that will help your agent understand what the tool does. Under the hood, this will use [`gradio-client`](https://pypi.org/project/gradio-client/) library to call the Space.
 
-For instance, let's import the [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) Space from the Hub and use it to generate an image.
+For instance, let's import the [FLUX.1-dev](https://huggingface.co/black-forest-labs/FLUX.1-dev) Space from the Hub and use it to generate an image. This tool requires network access.
 
 ```python
+from smolagents import Tool # Ensure Tool is imported
+
 image_generation_tool = Tool.from_space(
     "black-forest-labs/FLUX.1-schnell",
     name="image_generator",
-    description="Generate an image from a prompt"
+    description="Generate an image from a prompt (requires network)."
 )
 
-image_generation_tool("A sunny beach")
+# image = image_generation_tool("A sunny beach") # This call would use the network
+# print(image) # This would likely be an AgentImage or path to the image
 ```
 And voilà, here's your image! 🏖️
 
@@ -119,14 +245,15 @@ And voilà, here's your image! 🏖️
 Then you can use this tool just like any other tool.  For example, let's improve the prompt `a rabbit wearing a space suit` and generate an image of it. This example also shows how you can pass additional arguments to the agent.
 
 ```python
-from smolagents import CodeAgent, InferenceClientModel
+from smolagents import CodeAgent, InferenceClientModel, Tool # Ensure necessary imports
 
-model = InferenceClientModel(model_id="Qwen/Qwen2.5-Coder-32B-Instruct")
-agent = CodeAgent(tools=[image_generation_tool], model=model)
+# Assuming image_generation_tool is defined as above
+# model = InferenceClientModel(model_id="Qwen/Qwen2.5-Coder-32B-Instruct")
+# agent = CodeAgent(tools=[image_generation_tool], model=model)
 
-agent.run(
-    "Improve this prompt, then generate an image of it.", additional_args={'user_prompt': 'A rabbit wearing a space suit'}
-)
+# agent.run(
+#     "Improve this prompt, then generate an image of it.", additional_args={'user_prompt': 'A rabbit wearing a space suit'}
+# )
 ```
 
 ```text
@@ -143,21 +270,24 @@ final_answer(image)
 
 How cool is this? 🤩
 
-### Use LangChain tools
+### Use LangChain tools (May be Network Dependent)
 
 We love Langchain and think it has a very compelling suite of tools.
-To import a tool from LangChain, use the `from_langchain()` method.
+To import a tool from LangChain, use the `from_langchain()` method. Note that the underlying LangChain tool may itself require network access (e.g., if it's a wrapper around a web API like `SerpAPIWrapper`).
 
-Here is how you can use it to recreate the intro's search result using a LangChain web search tool.
-This tool will need `pip install langchain google-search-results -q` to work properly.
+Here is how you can use it to recreate the intro's search result using a LangChain web search tool (which is network dependent).
+This tool will need `pip install langchain langchain_community google-search-results -q` to work properly.
 ```python
-from langchain.agents import load_tools
+from smolagents import Tool # Ensure Tool is imported
+from langchain_community.tools import SerpAPIWrapper # Example, other tools available
+# from langchain.agents import load_tools # load_tools is a bit legacy in LangChain
 
-search_tool = Tool.from_langchain(load_tools(["serpapi"])[0])
+# search_tool = Tool.from_langchain(load_tools(["serpapi"])[0]) # Old way
+# search_tool = Tool.from_langchain(SerpAPIWrapper()) # More direct way using the specific class
 
-agent = CodeAgent(tools=[search_tool], model=model)
-
-agent.run("How many more blocks (also denoted as layers) are in BERT base encoder compared to the encoder from the architecture proposed in Attention is All You Need?")
+# model = ... # initialize your model
+# agent = CodeAgent(tools=[search_tool], model=model)
+# agent.run("How many more blocks (also denoted as layers) are in BERT base encoder compared to the encoder from the architecture proposed in Attention is All You Need?")
 ```
 
 ### Manage your agent's toolbox
@@ -167,19 +297,20 @@ You can manage an agent's toolbox by adding or replacing a tool in attribute `ag
 Let's add the `model_download_tool` to an existing agent initialized with only the default toolbox.
 
 ```python
-from smolagents import InferenceClientModel
+from smolagents import CodeAgent, InferenceClientModel # Assuming CodeAgent and model_downloads_tool are defined
 
-model = InferenceClientModel(model_id="Qwen/Qwen2.5-Coder-32B-Instruct")
+# model = InferenceClientModel(model_id="Qwen/Qwen2.5-Coder-32B-Instruct")
+# model_downloads_tool = HFModelDownloadsTool() # Assuming it's defined as above
 
-agent = CodeAgent(tools=[], model=model, add_base_tools=True)
-agent.tools[model_download_tool.name] = model_download_tool
+# agent = CodeAgent(tools=[], model=model, add_base_tools=True)
+# agent.tools[model_downloads_tool.name] = model_downloads_tool
 ```
 Now we can leverage the new tool:
 
 ```python
-agent.run(
-    "Can you give me the name of the model that has the most downloads in the 'text-to-video' task on the Hugging Face Hub but reverse the letters?"
-)
+# agent.run(
+#     "Can you give me the name of the model that has the most downloads in the 'text-to-video' task on the Hugging Face Hub but reverse the letters?"
+# )
 ```
 
 
@@ -189,29 +320,30 @@ agent.run(
 
 ### Use a collection of tools
 
-You can leverage tool collections by using [`ToolCollection`]. It supports loading either a collection from the Hub or an MCP server tools.
+You can leverage tool collections by using [`ToolCollection`]. A `ToolCollection` is a way to group locally defined or loaded tools. It also supports loading tools from an MCP server. Note that `ToolCollection.from_hub()` has been removed.
 
-#### Tool Collection from a collection in the Hub
+#### Tool Collection from locally defined/loaded tools
 
-You can leverage it with the slug of the collection you want to use.
-Then pass them as a list to initialize your agent, and start using them!
-
-```py
+You can create a `ToolCollection` by passing a list of your existing tool instances:
+```python
 from smolagents import ToolCollection, CodeAgent
 
-image_tool_collection = ToolCollection.from_hub(
-    collection_slug="huggingface-tools/diffusion-tools-6630bb19a942c2306a2cdb6f",
-    token="<YOUR_HUGGINGFACEHUB_API_TOKEN>"
-)
-agent = CodeAgent(tools=[*image_tool_collection.tools], model=model, add_base_tools=True)
+# Assume model_downloads_tool and another_tool are already defined or loaded
+# model_downloads_tool = HFModelDownloadsTool() 
+# another_tool = MyOtherCustomTool() # Assuming MyOtherCustomTool is a valid Tool subclass
 
-agent.run("Please draw me a picture of rivers and lakes.")
+# tools_list = [model_downloads_tool, another_tool]
+# local_tool_collection = ToolCollection(tools=tools_list)
+
+# Then pass them as a list to initialize your agent
+# model = ... # Initialize your model
+# agent = CodeAgent(tools=[*local_tool_collection.tools], model=model, add_base_tools=True)
+# agent.run("A task requiring one of these tools.")
 ```
 
-To speed up the start, tools are loaded only if called by the agent.
+#### Tool Collection from any MCP server (Network Dependent)
 
-#### Tool Collection from any MCP server
-
+`ToolCollection` also supports loading tools from MCP (Model Context Protocol) servers. This functionality inherently requires network access to communicate with the MCP servers.
 Leverage tools from the hundreds of MCP servers available on [glama.ai](https://glama.ai/mcp/servers) or [smithery.ai](https://smithery.ai/).
 
 > [!WARNING]
@@ -226,106 +358,120 @@ The MCP servers tools can be loaded with [`ToolCollection.from_mcp`].
 
 For stdio-based MCP servers, pass the server parameters as an instance of `mcp.StdioServerParameters`:
 ```py
-from smolagents import ToolCollection, CodeAgent
+from smolagents import ToolCollection, CodeAgent # Assuming CodeAgent and a model are defined
 from mcp import StdioServerParameters
+import os # For os.environ
 
-server_parameters = StdioServerParameters(
-    command="uvx",
-    args=["--quiet", "pubmedmcp@0.1.3"],
-    env={"UV_PYTHON": "3.12", **os.environ},
-)
+# server_parameters = StdioServerParameters(
+#     command="uvx",
+#     args=["--quiet", "pubmedmcp@0.1.3"],
+#     env={"UV_PYTHON": "3.12", **os.environ},
+# )
 
-with ToolCollection.from_mcp(server_parameters, trust_remote_code=True) as tool_collection:
-    agent = CodeAgent(tools=[*tool_collection.tools], model=model, add_base_tools=True)
-    agent.run("Please find a remedy for hangover.")
+# model = ... # Initialize your model
+# with ToolCollection.from_mcp(server_parameters, trust_remote_code=True) as tool_collection: # trust_remote_code is crucial here
+#     agent = CodeAgent(tools=[*tool_collection.tools], model=model, add_base_tools=True)
+#     agent.run("Please find a remedy for hangover.")
 ```
 
 For SSE-based MCP servers, simply pass a dict with parameters to `mcp.client.sse.sse_client`:
 ```py
-from smolagents import ToolCollection, CodeAgent
+from smolagents import ToolCollection, CodeAgent # Assuming CodeAgent and a model are defined
+import os # For os.environ
 
-with ToolCollection.from_mcp({"url": "http://127.0.0.1:8000/sse"}, trust_remote_code=True) as tool_collection:
-    agent = CodeAgent(tools=[*tool_collection.tools], add_base_tools=True)
-    agent.run("Please find a remedy for hangover.")
+# model = ... # Initialize your model
+# with ToolCollection.from_mcp({"url": "http://127.0.0.1:8000/sse"}, trust_remote_code=True) as tool_collection: # trust_remote_code is crucial
+#     agent = CodeAgent(tools=[*tool_collection.tools], model=model, add_base_tools=True)
+#     agent.run("Please find a remedy for hangover.")
 ```
 
-### Use MCP tools with MCPClient directly
+> [!NOTE]
+> The `trust_remote_code=True` parameter is essential when using MCP tools, as they involve executing code that may originate from an external server. Always ensure you trust the MCP server you are connecting to.
 
-You can also work with MCP tools by using the `MCPClient` directly, which gives you more control over the connection and tool management:
+### Using MCP tools with MCPClient (Network Dependent)
+
+You can also work with MCP tools by using the `MCPClient` directly, which gives you more control over the connection and tool management. This also requires network access.
 
 For stdio-based MCP servers:
 ```python
-from smolagents import MCPClient, CodeAgent
+from smolagents import MCPClient, CodeAgent # Assuming CodeAgent and a model are defined
 from mcp import StdioServerParameters
 import os
 
-server_parameters = StdioServerParameters(
-    command="uvx",  # Using uvx ensures dependencies are available
-    args=["--quiet", "pubmedmcp@0.1.3"],
-    env={"UV_PYTHON": "3.12", **os.environ},
-)
+# server_parameters = StdioServerParameters(
+#     command="uvx",  # Using uvx ensures dependencies are available
+#     args=["--quiet", "pubmedmcp@0.1.3"],
+#     env={"UV_PYTHON": "3.12", **os.environ},
+# )
 
-with MCPClient(server_parameters) as tools:
-    agent = CodeAgent(tools=tools, model=model, add_base_tools=True)
-    agent.run("Please find the latest research on COVID-19 treatment.")
+# model = ... # Initialize your model
+# with MCPClient(server_parameters) as tools:
+#     agent = CodeAgent(tools=tools, model=model, add_base_tools=True)
+#     agent.run("Please find the latest research on COVID-19 treatment.")
 ```
 
 For SSE-based MCP servers:
 ```python
-from smolagents import MCPClient, CodeAgent
+from smolagents import MCPClient, CodeAgent # Assuming CodeAgent and a model are defined
+import os # For os.environ
 
-with MCPClient({"url": "http://127.0.0.1:8000/sse"}) as tools:
-    agent = CodeAgent(tools=tools, model=model, add_base_tools=True)
-    agent.run("Please find a remedy for hangover.")
+# model = ... # Initialize your model
+# with MCPClient({"url": "http://127.0.0.1:8000/sse"}) as tools:
+#     agent = CodeAgent(tools=tools, model=model, add_base_tools=True)
+#     agent.run("Please find a remedy for hangover.")
 ```
 
 You can also manually manage the connection lifecycle with the try...finally pattern:
 
 ```python
-from smolagents import MCPClient, CodeAgent
+from smolagents import MCPClient, CodeAgent # Assuming CodeAgent and a model are defined
 from mcp import StdioServerParameters
 import os
 
 # Initialize server parameters
-server_parameters = StdioServerParameters(
-    command="uvx",
-    args=["--quiet", "pubmedmcp@0.1.3"],
-    env={"UV_PYTHON": "3.12", **os.environ},
-)
+# server_parameters = StdioServerParameters(
+#     command="uvx",
+#     args=["--quiet", "pubmedmcp@0.1.3"],
+#     env={"UV_PYTHON": "3.12", **os.environ},
+# )
 
 # Manually manage the connection
-try:
-    mcp_client = MCPClient(server_parameters)
-    tools = mcp_client.get_tools()
+# mcp_client = None # Define before try block
+# try:
+#     mcp_client = MCPClient(server_parameters)
+#     tools = mcp_client.get_tools()
 
     # Use the tools with your agent
-    agent = CodeAgent(tools=tools, model=model, add_base_tools=True)
-    result = agent.run("What are the recent therapeutic approaches for Alzheimer's disease?")
+    # model = ... # Initialize your model
+    # agent = CodeAgent(tools=tools, model=model, add_base_tools=True)
+    # result = agent.run("What are the recent therapeutic approaches for Alzheimer's disease?")
 
     # Process the result as needed
-    print(f"Agent response: {result}")
-finally:
+    # print(f"Agent response: {result}")
+# finally:
     # Always ensure the connection is properly closed
-    mcp_client.disconnect()
+    # if mcp_client:
+        # mcp_client.disconnect()
 ```
 
 You can also connect to multiple MCP servers at once by passing a list of server parameters:
 ```python
-from smolagents import MCPClient, CodeAgent
+from smolagents import MCPClient, CodeAgent # Assuming CodeAgent and a model are defined
 from mcp import StdioServerParameters
 import os
 
-server_params1 = StdioServerParameters(
-    command="uvx",
-    args=["--quiet", "pubmedmcp@0.1.3"],
-    env={"UV_PYTHON": "3.12", **os.environ},
-)
+# server_params1 = StdioServerParameters(
+#     command="uvx",
+#     args=["--quiet", "pubmedmcp@0.1.3"],
+#     env={"UV_PYTHON": "3.12", **os.environ},
+# )
 
-server_params2 = {"url": "http://127.0.0.1:8000/sse"}
+# server_params2 = {"url": "http://127.0.0.1:8000/sse"}
 
-with MCPClient([server_params1, server_params2]) as tools:
-    agent = CodeAgent(tools=tools, model=model, add_base_tools=True)
-    agent.run("Please analyze the latest research and suggest remedies for headaches.")
+# model = ... # Initialize your model
+# with MCPClient([server_params1, server_params2]) as tools:
+#     agent = CodeAgent(tools=tools, model=model, add_base_tools=True)
+#     agent.run("Please analyze the latest research and suggest remedies for headaches.")
 ```
 
 > [!WARNING]

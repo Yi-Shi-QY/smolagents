@@ -31,7 +31,6 @@ from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 import jinja2
 import yaml
-from huggingface_hub import create_repo, metadata_update, snapshot_download, upload_folder
 from jinja2 import StrictUndefined, Template
 from rich.console import Group
 from rich.live import Live
@@ -974,60 +973,6 @@ You have been provided with these additional arguments, that you can access usin
         return cls(**agent_args)
 
     @classmethod
-    def from_hub(
-        cls,
-        repo_id: str,
-        token: str | None = None,
-        trust_remote_code: bool = False,
-        **kwargs,
-    ):
-        """
-        Loads an agent defined on the Hub.
-
-        <Tip warning={true}>
-
-        Loading a tool from the Hub means that you'll download the tool and execute it locally.
-        ALWAYS inspect the tool you're downloading before loading it within your runtime, as you would do when
-        installing a package using pip/npm/apt.
-
-        </Tip>
-
-        Args:
-            repo_id (`str`):
-                The name of the repo on the Hub where your tool is defined.
-            token (`str`, *optional*):
-                The token to identify you on hf.co. If unset, will use the token generated when running
-                `huggingface-cli login` (stored in `~/.huggingface`).
-            trust_remote_code(`bool`, *optional*, defaults to False):
-                This flags marks that you understand the risk of running remote code and that you trust this tool.
-                If not setting this to True, loading the tool from Hub will fail.
-            kwargs (additional keyword arguments, *optional*):
-                Additional keyword arguments that will be split in two: all arguments relevant to the Hub (such as
-                `cache_dir`, `revision`, `subfolder`) will be used when downloading the files for your agent, and the
-                others will be passed along to its init.
-        """
-        if not trust_remote_code:
-            raise ValueError(
-                "Loading an agent from Hub requires to acknowledge you trust its code: to do so, pass `trust_remote_code=True`."
-            )
-
-        # Get the agent's Hub folder.
-        download_kwargs = {"token": token, "repo_type": "space"} | {
-            key: kwargs.pop(key)
-            for key in [
-                "cache_dir",
-                "force_download",
-                "proxies",
-                "revision",
-                "local_files_only",
-            ]
-            if key in kwargs
-        }
-
-        download_folder = Path(snapshot_download(repo_id=repo_id, **download_kwargs))
-        return cls.from_folder(download_folder, **kwargs)
-
-    @classmethod
     def from_folder(cls, folder: str | Path, **kwargs):
         """Loads an agent from a local folder.
 
@@ -1058,60 +1003,6 @@ You have been provided with these additional arguments, that you can access usin
             kwargs["managed_agents"] = managed_agents
 
         return cls.from_dict(agent_dict, **kwargs)
-
-    def push_to_hub(
-        self,
-        repo_id: str,
-        commit_message: str = "Upload agent",
-        private: bool | None = None,
-        token: bool | str | None = None,
-        create_pr: bool = False,
-    ) -> str:
-        """
-        Upload the agent to the Hub.
-
-        Parameters:
-            repo_id (`str`):
-                The name of the repository you want to push to. It should contain your organization name when
-                pushing to a given organization.
-            commit_message (`str`, *optional*, defaults to `"Upload agent"`):
-                Message to commit while pushing.
-            private (`bool`, *optional*, defaults to `None`):
-                Whether to make the repo private. If `None`, the repo will be public unless the organization's default is private. This value is ignored if the repo already exists.
-            token (`bool` or `str`, *optional*):
-                The token to use as HTTP bearer authorization for remote files. If unset, will use the token generated
-                when running `huggingface-cli login` (stored in `~/.huggingface`).
-            create_pr (`bool`, *optional*, defaults to `False`):
-                Whether to create a PR with the uploaded files or directly commit.
-        """
-        repo_url = create_repo(
-            repo_id=repo_id,
-            token=token,
-            private=private,
-            exist_ok=True,
-            repo_type="space",
-            space_sdk="gradio",
-        )
-        repo_id = repo_url.repo_id
-        metadata_update(
-            repo_id,
-            {"tags": ["smolagents", "agent"]},
-            repo_type="space",
-            token=token,
-            overwrite=True,
-        )
-
-        with tempfile.TemporaryDirectory() as work_dir:
-            self.save(work_dir)
-            logger.info(f"Uploading the following files to {repo_id}: {','.join(os.listdir(work_dir))}")
-            return upload_folder(
-                repo_id=repo_id,
-                commit_message=commit_message,
-                folder_path=work_dir,
-                token=token,
-                create_pr=create_pr,
-                repo_type="space",
-            )
 
 
 class ToolCallingAgent(MultiStepAgent):

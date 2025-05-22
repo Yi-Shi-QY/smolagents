@@ -31,15 +31,6 @@ from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from huggingface_hub import (
-    CommitOperationAdd,
-    create_commit,
-    create_repo,
-    get_collection,
-    hf_hub_download,
-    metadata_update,
-)
-
 from ._function_type_hints_utils import (
     TypeHintParsingException,
     _convert_type_hints_to_json_schema,
@@ -326,80 +317,6 @@ class Tool:
         """Writes content to a file with UTF-8 encoding."""
         file_path.write_text(content, encoding="utf-8")
 
-    def push_to_hub(
-        self,
-        repo_id: str,
-        commit_message: str = "Upload tool",
-        private: bool | None = None,
-        token: bool | str | None = None,
-        create_pr: bool = False,
-    ) -> str:
-        """
-        Upload the tool to the Hub.
-
-        Parameters:
-            repo_id (`str`):
-                The name of the repository you want to push your tool to. It should contain your organization name when
-                pushing to a given organization.
-            commit_message (`str`, *optional*, defaults to `"Upload tool"`):
-                Message to commit while pushing.
-            private (`bool`, *optional*):
-                Whether to make the repo private. If `None` (default), the repo will be public unless the organization's default is private. This value is ignored if the repo already exists.
-            token (`bool` or `str`, *optional*):
-                The token to use as HTTP bearer authorization for remote files. If unset, will use the token generated
-                when running `huggingface-cli login` (stored in `~/.huggingface`).
-            create_pr (`bool`, *optional*, defaults to `False`):
-                Whether to create a PR with the uploaded files or directly commit.
-        """
-        # Initialize repository
-        repo_id = self._initialize_hub_repo(repo_id, token, private)
-        # Prepare files for commit
-        additions = self._prepare_hub_files()
-        # Create commit
-        return create_commit(
-            repo_id=repo_id,
-            operations=additions,
-            commit_message=commit_message,
-            token=token,
-            create_pr=create_pr,
-            repo_type="space",
-        )
-
-    @staticmethod
-    def _initialize_hub_repo(repo_id: str, token: bool | str | None, private: bool | None) -> str:
-        """Initialize repository on Hugging Face Hub."""
-        repo_url = create_repo(
-            repo_id=repo_id,
-            token=token,
-            private=private,
-            exist_ok=True,
-            repo_type="space",
-            space_sdk="gradio",
-        )
-        metadata_update(repo_url.repo_id, {"tags": ["smolagents", "tool"]}, repo_type="space", token=token)
-        return repo_url.repo_id
-
-    def _prepare_hub_files(self) -> list:
-        """Prepare files for Hub commit."""
-        additions = [
-            # Add tool code
-            CommitOperationAdd(
-                path_in_repo="tool.py",
-                path_or_fileobj=self._get_tool_code().encode(),
-            ),
-            # Add Gradio app
-            CommitOperationAdd(
-                path_in_repo="app.py",
-                path_or_fileobj=self._get_gradio_app_code().encode(),
-            ),
-            # Add requirements
-            CommitOperationAdd(
-                path_in_repo="requirements.txt",
-                path_or_fileobj=self._get_requirements().encode(),
-            ),
-        ]
-        return additions
-
     def _get_tool_code(self) -> str:
         """Get the tool's code."""
         return self.to_dict()["code"]
@@ -420,61 +337,6 @@ class Tool:
     def _get_requirements(self) -> str:
         """Get the requirements."""
         return "\n".join(self.to_dict()["requirements"])
-
-    @classmethod
-    def from_hub(
-        cls,
-        repo_id: str,
-        token: str | None = None,
-        trust_remote_code: bool = False,
-        **kwargs,
-    ):
-        """
-        Loads a tool defined on the Hub.
-
-        <Tip warning={true}>
-
-        Loading a tool from the Hub means that you'll download the tool and execute it locally.
-        ALWAYS inspect the tool you're downloading before loading it within your runtime, as you would do when
-        installing a package using pip/npm/apt.
-
-        </Tip>
-
-        Args:
-            repo_id (`str`):
-                The name of the Space repo on the Hub where your tool is defined.
-            token (`str`, *optional*):
-                The token to identify you on hf.co. If unset, will use the token generated when running
-                `huggingface-cli login` (stored in `~/.huggingface`).
-            trust_remote_code(`str`, *optional*, defaults to False):
-                This flags marks that you understand the risk of running remote code and that you trust this tool.
-                If not setting this to True, loading the tool from Hub will fail.
-            kwargs (additional keyword arguments, *optional*):
-                Additional keyword arguments that will be split in two: all arguments relevant to the Hub (such as
-                `cache_dir`, `revision`, `subfolder`) will be used when downloading the files for your tool, and the
-                others will be passed along to its init.
-        """
-        if not trust_remote_code:
-            raise ValueError(
-                "Loading a tool from Hub requires to acknowledge you trust its code: to do so, pass `trust_remote_code=True`."
-            )
-
-        # Get the tool's tool.py file.
-        tool_file = hf_hub_download(
-            repo_id,
-            "tool.py",
-            token=token,
-            repo_type="space",
-            cache_dir=kwargs.get("cache_dir"),
-            force_download=kwargs.get("force_download"),
-            proxies=kwargs.get("proxies"),
-            revision=kwargs.get("revision"),
-            subfolder=kwargs.get("subfolder"),
-            local_files_only=kwargs.get("local_files_only"),
-        )
-
-        tool_code = Path(tool_file).read_text()
-        return Tool.from_code(tool_code, **kwargs)
 
     @classmethod
     def from_code(cls, tool_code: str, **kwargs):
@@ -732,48 +594,6 @@ def launch_gradio_demo(tool: Tool):
     ).launch()
 
 
-def load_tool(
-    repo_id,
-    model_repo_id: str | None = None,
-    token: str | None = None,
-    trust_remote_code: bool = False,
-    **kwargs,
-):
-    """
-    Main function to quickly load a tool from the Hub.
-
-    <Tip warning={true}>
-
-    Loading a tool means that you'll download the tool and execute it locally.
-    ALWAYS inspect the tool you're downloading before loading it within your runtime, as you would do when
-    installing a package using pip/npm/apt.
-
-    </Tip>
-
-    Args:
-        repo_id (`str`):
-            Space repo ID of a tool on the Hub.
-        model_repo_id (`str`, *optional*):
-            Use this argument to use a different model than the default one for the tool you selected.
-        token (`str`, *optional*):
-            The token to identify you on hf.co. If unset, will use the token generated when running `huggingface-cli
-            login` (stored in `~/.huggingface`).
-        trust_remote_code (`bool`, *optional*, defaults to False):
-            This needs to be accepted in order to load a tool from Hub.
-        kwargs (additional keyword arguments, *optional*):
-            Additional keyword arguments that will be split in two: all arguments relevant to the Hub (such as
-            `cache_dir`, `revision`, `subfolder`) will be used when downloading the files for your tool, and the others
-            will be passed along to its init.
-    """
-    return Tool.from_hub(
-        repo_id,
-        model_repo_id=model_repo_id,
-        token=token,
-        trust_remote_code=trust_remote_code,
-        **kwargs,
-    )
-
-
 def add_description(description):
     """
     A decorator that adds a description to a function.
@@ -800,46 +620,6 @@ class ToolCollection:
 
     def __init__(self, tools: list[Tool]):
         self.tools = tools
-
-    @classmethod
-    def from_hub(
-        cls,
-        collection_slug: str,
-        token: str | None = None,
-        trust_remote_code: bool = False,
-    ) -> "ToolCollection":
-        """Loads a tool collection from the Hub.
-
-        it adds a collection of tools from all Spaces in the collection to the agent's toolbox
-
-        > [!NOTE]
-        > Only Spaces will be fetched, so you can feel free to add models and datasets to your collection if you'd
-        > like for this collection to showcase them.
-
-        Args:
-            collection_slug (str): The collection slug referencing the collection.
-            token (str, *optional*): The authentication token if the collection is private.
-            trust_remote_code (bool, *optional*, defaults to False): Whether to trust the remote code.
-
-        Returns:
-            ToolCollection: A tool collection instance loaded with the tools.
-
-        Example:
-        ```py
-        >>> from smolagents import ToolCollection, CodeAgent
-
-        >>> image_tool_collection = ToolCollection.from_hub("huggingface-tools/diffusion-tools-6630bb19a942c2306a2cdb6f")
-        >>> agent = CodeAgent(tools=[*image_tool_collection.tools], add_base_tools=True)
-
-        >>> agent.run("Please draw me a picture of rivers and lakes.")
-        ```
-        """
-        _collection = get_collection(collection_slug, token=token)
-        _hub_repo_ids = {item.item_id for item in _collection.items if item.item_type == "space"}
-
-        tools = {Tool.from_hub(repo_id, token, trust_remote_code) for repo_id in _hub_repo_ids}
-
-        return cls(tools)
 
     @classmethod
     @contextmanager
@@ -1174,7 +954,6 @@ __all__ = [
     "AUTHORIZED_TYPES",
     "Tool",
     "tool",
-    "load_tool",
     "launch_gradio_demo",
     "ToolCollection",
 ]

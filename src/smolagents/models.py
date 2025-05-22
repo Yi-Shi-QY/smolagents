@@ -21,6 +21,7 @@ from collections.abc import Generator
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from enum import Enum
+from pathlib import Path
 from threading import Thread
 from typing import TYPE_CHECKING, Any
 
@@ -458,9 +459,20 @@ class VLLMModel(Model):
         self.model_kwargs = model_kwargs or {}
         super().__init__(**kwargs)
         self.model_id = model_id
+
+        is_local_path = Path(model_id).is_dir()
+        # Note: vLLM's LLM constructor itself doesn't have a direct 'local_files_only' flag.
+        # It determines local vs. Hub based on the 'model' argument format.
+        # If 'model_id' is a path to a local directory, vLLM attempts to load it from there.
+        # Ensuring all necessary files are present in the local directory is key for offline use.
         self.model = LLM(model=model_id, **self.model_kwargs)
         assert self.model is not None
-        self.tokenizer = get_tokenizer(model_id)
+
+        tokenizer_args = {}
+        if is_local_path:
+            tokenizer_args["local_files_only"] = True
+        # get_tokenizer in VLLM passes unknown_args (like local_files_only) to AutoTokenizer.from_pretrained
+        self.tokenizer = get_tokenizer(model_id, **tokenizer_args)
         self._is_vlm = False  # VLLMModel does not support vision models yet.
 
     def cleanup(self):
@@ -597,7 +609,13 @@ class MLXModel(Model):
         import mlx_lm  # type: ignore
 
         self.model_id = model_id
-        self.model, self.tokenizer = mlx_lm.load(model_id, tokenizer_config={"trust_remote_code": trust_remote_code})
+        tokenizer_config = {"trust_remote_code": trust_remote_code}
+        if Path(model_id).is_dir():
+            tokenizer_config["local_files_only"] = True
+        
+        # mlx_lm.load determines local vs. Hub from model_id format.
+        # tokenizer_config is passed to AutoTokenizer.from_pretrained internally.
+        self.model, self.tokenizer = mlx_lm.load(model_id, tokenizer_config=tokenizer_config)
         self.stream_generate = mlx_lm.stream_generate
         self.tool_name_key = tool_name_key
         self.tool_arguments_key = tool_arguments_key
@@ -734,26 +752,42 @@ class TransformersModel(Model):
             device_map = "cuda" if torch.cuda.is_available() else "cpu"
         logger.info(f"Using device: {device_map}")
         self._is_vlm = False
+
+        is_local_path = Path(model_id).is_dir()
+        from_pretrained_args = {
+            "device_map": device_map,
+            "torch_dtype": torch_dtype,
+            "trust_remote_code": trust_remote_code,
+        }
+        if is_local_path:
+            from_pretrained_args["local_files_only"] = True
+
         try:
             self.model = AutoModelForImageTextToText.from_pretrained(
                 model_id,
-                device_map=device_map,
-                torch_dtype=torch_dtype,
-                trust_remote_code=trust_remote_code,
+                **from_pretrained_args,
             )
-            self.processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+            # For processor/tokenizer, also use local_files_only if model_id is local
+            self.processor = AutoProcessor.from_pretrained(
+                model_id, 
+                trust_remote_code=trust_remote_code, 
+                local_files_only=True if is_local_path else False
+            )
             self._is_vlm = True
             self.streamer = TextIteratorStreamer(self.processor.tokenizer, skip_prompt=True, skip_special_tokens=True)  # type: ignore
 
         except ValueError as e:
-            if "Unrecognized configuration class" in str(e):
+            if "Unrecognized configuration class" in str(e) or "does not appear to have a file named preprocessor_config.json" in str(e) : # Second condition for vision models when processor is not found
                 self.model = AutoModelForCausalLM.from_pretrained(
                     model_id,
-                    device_map=device_map,
-                    torch_dtype=torch_dtype,
-                    trust_remote_code=trust_remote_code,
+                    **from_pretrained_args,
                 )
-                self.tokenizer = AutoTokenizer.from_pretrained(model_id, trust_remote_code=trust_remote_code)
+                # For tokenizer, also use local_files_only if model_id is local
+                self.tokenizer = AutoTokenizer.from_pretrained(
+                    model_id, 
+                    trust_remote_code=trust_remote_code, 
+                    local_files_only=True if is_local_path else False
+                )
                 self.streamer = TextIteratorStreamer(self.tokenizer, skip_prompt=True, skip_special_tokens=True)  # type: ignore
             else:
                 raise e
